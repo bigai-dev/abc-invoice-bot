@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>ABC Logo — Right-click to save</title>
+<style>
+  body { margin:0; padding:40px; background:#f3f4f6; font-family:sans-serif; display:flex; flex-direction:column; align-items:center; gap:20px; }
+  h2 { margin:0; color:#333; }
+  .logo-wrap { padding:20px; background:white; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.1); }
+  .logo-wrap img { width:512px; height:512px; display:block; }
+  .small { width:128px; height:128px; display:block; margin:8px; }
+  .row { display:flex; gap:20px; align-items:center; background:white; padding:20px; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.1); }
+  .btn { display:inline-block; background:#059669; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; font-weight:600; margin-top:10px; }
+  .btn:hover { background:#047857; }
+  .hint { color:#666; font-size:14px; max-width:512px; text-align:center; }
+</style>
+</head>
+<body>
+<h2>ABC Sdn Bhd — Bot & Invoice Logo</h2>
+
+<div class="logo-wrap">
+  <img src="/logo.svg" alt="ABC logo" id="logo" />
+</div>
+
+<div class="row">
+  <img src="/logo.svg" class="small" />
+  <div>
+    <div>Preview at smaller size</div>
+    <div style="color:#666;font-size:12px;">This is what it'll look like as your bot profile pic.</div>
+  </div>
+</div>
+
+<p class="hint">
+  <b>To save as PNG:</b><br>
+  1. Right-click the large logo above → <b>Save image as…</b> → save as <code>abc-logo.svg</code><br>
+  2. Convert to PNG at <a href="https://cloudconvert.com/svg-to-png" target="_blank">cloudconvert.com/svg-to-png</a> (free, no signup)<br>
+  3. Upload PNG to BotFather via <b>/setuserpic</b>
+</p>
+
+<a class="btn" href="/logo.svg" download="abc-logo.svg">⬇ Download SVG</a>
+
+</body>
+</html>

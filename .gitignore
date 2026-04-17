@@ -1,0 +1,29 @@
+node_modules
+.next
+out
+build
+dist
+
+# Env files — never commit these
+.env*.local
+.env
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode
+.idea
+*.swp
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+.vercel
