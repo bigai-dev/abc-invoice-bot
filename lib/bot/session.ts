@@ -1,29 +1,28 @@
-import { createAdminClient } from "../supabase/admin";
+import { getDb } from "../db/client";
 import type { BotState } from "./types";
 
 export async function getSession(chatId: string): Promise<BotState> {
-  const supabase = createAdminClient();
-  const { data } = await supabase
-    .from("bot_sessions")
-    .select("state")
-    .eq("telegram_chat_id", chatId)
-    .maybeSingle();
-  return (data?.state as BotState) || {};
+  const db = getDb();
+  const row = db
+    .prepare(`select state from bot_sessions where telegram_chat_id = ?`)
+    .get(chatId) as { state: string | null } | undefined;
+  if (!row?.state) return {};
+  try {
+    return JSON.parse(row.state) as BotState;
+  } catch {
+    return {};
+  }
 }
 
 export async function saveSession(chatId: string, state: BotState) {
-  const supabase = createAdminClient();
-  await supabase.from("bot_sessions").upsert(
-    {
-      telegram_chat_id: chatId,
-      state,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "telegram_chat_id" }
-  );
+  const db = getDb();
+  db.prepare(
+    `insert into bot_sessions (telegram_chat_id, state, updated_at) values (?, ?, ?)
+     on conflict(telegram_chat_id) do update set state = excluded.state, updated_at = excluded.updated_at`
+  ).run(chatId, JSON.stringify(state || {}), new Date().toISOString());
 }
 
 export async function clearSession(chatId: string) {
-  const supabase = createAdminClient();
-  await supabase.from("bot_sessions").delete().eq("telegram_chat_id", chatId);
+  const db = getDb();
+  db.prepare(`delete from bot_sessions where telegram_chat_id = ?`).run(chatId);
 }

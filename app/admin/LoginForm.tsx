@@ -1,10 +1,8 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 export default function LoginForm({ error }: { error?: string }) {
-  const [email, setEmail] = useState("abc@abc.com");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [errMsg, setErrMsg] = useState("");
@@ -14,11 +12,17 @@ export default function LoginForm({ error }: { error?: string }) {
     e.preventDefault();
     setLoading(true);
     setErrMsg("");
-    const supabase = createSupabaseBrowserClient();
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const res = await fetch("/admin/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
     setLoading(false);
-    if (error) setErrMsg(error.message);
-    else router.refresh();
+    if (res.ok) router.refresh();
+    else {
+      const j = await res.json().catch(() => ({}));
+      setErrMsg(j.error || "Login failed");
+    }
   }
 
   return (
@@ -32,31 +36,25 @@ export default function LoginForm({ error }: { error?: string }) {
 
         {error === "unauthorized" && (
           <div className="mb-4 bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">
-            This email isn&apos;t authorized for admin access.
+            Please sign in to continue.
           </div>
         )}
 
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-blue-500"
-            />
-          </div>
-          <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
             <input
               type="password"
               required
+              autoFocus
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-blue-500"
               placeholder="••••••••"
             />
+            <p className="text-[11px] text-gray-400 mt-1">
+              Set <code>ADMIN_PASSWORD</code> in <code>.env.local</code>. Default is <code>admin</code>.
+            </p>
           </div>
           {errMsg && <div className="text-red-600 text-sm">{errMsg}</div>}
           <button

@@ -27,3 +27,10 @@ Thumbs.db
 next-env.d.ts
 
 .vercel
+
+# Local SQLite database + uploaded files (never commit)
+data.db
+data.db-journal
+data.db-wal
+data.db-shm
+storage/

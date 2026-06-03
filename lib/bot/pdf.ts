@@ -1,5 +1,6 @@
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
-import { createAdminClient } from "../supabase/admin";
+import { getDb } from "../db/client";
+import { saveFile } from "../storage/local";
 
 type InvoiceInput = {
   orderRef: string;
@@ -12,8 +13,8 @@ type InvoiceInput = {
 };
 
 export async function generateInvoicePDF(input: InvoiceInput): Promise<Uint8Array> {
-  const supabase = createAdminClient();
-  const { data: settings } = await supabase.from("invoice_settings").select("*").eq("id", 1).single();
+  const db = getDb();
+  const settings = db.prepare(`select * from invoice_settings where id = 1`).get() as any;
 
   const pdf = await PDFDocument.create();
   const page = pdf.addPage([595.28, 841.89]); // A4
@@ -39,10 +40,10 @@ export async function generateInvoicePDF(input: InvoiceInput): Promise<Uint8Arra
   // Header (offset right of logo)
   const textX = margin + 75;
   page.drawText(settings?.company_name || "ABC Sdn Bhd", {
-    x: textX, y: y - 4, size: 22, font: bold, color: rgb(0.15, 0.45, 0.30),  // deep green
+    x: textX, y: y - 4, size: 22, font: bold, color: rgb(0.15, 0.45, 0.30),
   });
   page.drawText(`SSM: ${settings?.ssm_number || ""}`, { x: textX, y: y - 22, size: 10, font, color: rgb(0.4, 0.4, 0.4) });
-  page.drawText(`Premium Wellness & Supplements`, { x: textX, y: y - 36, size: 9, font, color: rgb(0.6, 0.5, 0.2) });  // gold accent
+  page.drawText(`Premium Wellness & Supplements`, { x: textX, y: y - 36, size: 9, font, color: rgb(0.6, 0.5, 0.2) });
 
   // Invoice title (right aligned)
   page.drawText("INVOICE", { x: width - margin - 90, y, size: 22, font: bold, color: rgb(0.15, 0.45, 0.30) });
@@ -51,11 +52,9 @@ export async function generateInvoicePDF(input: InvoiceInput): Promise<Uint8Arra
 
   y = height - margin - 80;
 
-  // Separator
   page.drawLine({ start: { x: margin, y }, end: { x: width - margin, y }, thickness: 1, color: rgb(0.85, 0.85, 0.85) });
   y -= 24;
 
-  // Bill to
   page.drawText("BILL TO", { x: margin, y, size: 10, font: bold, color: rgb(0.4, 0.4, 0.4) });
   y -= 14;
   page.drawText(input.customer.name, { x: margin, y, size: 12, font: bold });
@@ -64,20 +63,16 @@ export async function generateInvoicePDF(input: InvoiceInput): Promise<Uint8Arra
   y -= 12;
   page.drawText(input.customer.email, { x: margin, y, size: 10, font });
   y -= 12;
-  // Wrap address
-  const addr = input.customer.address;
-  const wrapped = wrapText(addr, 60);
+  const wrapped = wrapText(input.customer.address, 60);
   for (const line of wrapped) {
     page.drawText(line, { x: margin, y, size: 10, font });
     y -= 12;
   }
   y -= 20;
 
-  // Order ref
   page.drawText(`Order Reference: ${input.orderRef}`, { x: margin, y, size: 10, font });
   y -= 24;
 
-  // Items table header
   const colX = { item: margin, qty: 330, price: 400, total: 480 };
   page.drawRectangle({ x: margin - 4, y: y - 4, width: width - 2 * margin + 8, height: 22, color: rgb(0.95, 0.96, 0.98) });
   page.drawText("ITEM", { x: colX.item, y, size: 10, font: bold });
@@ -86,7 +81,6 @@ export async function generateInvoicePDF(input: InvoiceInput): Promise<Uint8Arra
   page.drawText("SUBTOTAL", { x: colX.total, y, size: 10, font: bold });
   y -= 22;
 
-  // Items
   for (const it of input.items) {
     page.drawText(`${it.name}`, { x: colX.item, y, size: 10, font });
     page.drawText(`(${it.sku})`, { x: colX.item, y: y - 11, size: 8, font, color: rgb(0.5, 0.5, 0.5) });
@@ -96,11 +90,9 @@ export async function generateInvoicePDF(input: InvoiceInput): Promise<Uint8Arra
     y -= 28;
   }
 
-  // Separator
   page.drawLine({ start: { x: margin, y }, end: { x: width - margin, y }, thickness: 0.5, color: rgb(0.85, 0.85, 0.85) });
   y -= 18;
 
-  // Totals
   const totalsX = 400;
   page.drawText("Subtotal:", { x: totalsX, y, size: 10, font });
   page.drawText(`RM ${input.base.toFixed(2)}`, { x: colX.total, y, size: 10, font });
@@ -113,7 +105,6 @@ export async function generateInvoicePDF(input: InvoiceInput): Promise<Uint8Arra
 
   y -= 50;
 
-  // Bank details
   page.drawLine({ start: { x: margin, y }, end: { x: width - margin, y }, thickness: 0.5, color: rgb(0.85, 0.85, 0.85) });
   y -= 18;
   page.drawText("PAYMENT DETAILS", { x: margin, y, size: 10, font: bold, color: rgb(0.4, 0.4, 0.4) });
@@ -124,7 +115,6 @@ export async function generateInvoicePDF(input: InvoiceInput): Promise<Uint8Arra
   y -= 12;
   page.drawText(`Name: ${settings?.bank_holder || ""}`, { x: margin, y, size: 10, font });
 
-  // Footer
   if (settings?.footer_notes) {
     page.drawText(settings.footer_notes, { x: margin, y: 40, size: 9, font, color: rgb(0.5, 0.5, 0.5) });
   }
@@ -148,16 +138,11 @@ function wrapText(text: string, maxChars: number): string[] {
   return lines;
 }
 
+// Save the invoice PDF to local storage and return its public URL.
+// Returns relative path (e.g. /api/files/invoices/<id>.pdf).
 export async function uploadInvoiceToStorage(
   orderId: string,
   pdfBytes: Uint8Array
 ): Promise<string> {
-  const supabase = createAdminClient();
-  const path = `${orderId}.pdf`;
-  const { error } = await supabase.storage
-    .from("invoices")
-    .upload(path, pdfBytes, { contentType: "application/pdf", upsert: true });
-  if (error) throw error;
-  const signed = await supabase.storage.from("invoices").createSignedUrl(path, 60 * 60 * 24 * 30);
-  return signed.data?.signedUrl || "";
+  return saveFile("invoices", `${orderId}.pdf`, pdfBytes);
 }

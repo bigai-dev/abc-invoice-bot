@@ -1,15 +1,19 @@
-import { createAdminClient } from "@/lib/supabase/admin";
+import { getDb } from "@/lib/db/client";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReviewsPage() {
-  const admin = createAdminClient();
-  const { data: reviews } = await admin
-    .from("reviews")
-    .select("*, customers(name), orders(order_reference)")
-    .order("created_at", { ascending: false });
+  const db = getDb();
+  const list = db
+    .prepare(
+      `select r.*, c.name as customer_name, o.order_reference as order_reference
+       from reviews r
+       left join customers c on c.id = r.customer_id
+       left join orders o on o.id = r.order_id
+       order by r.created_at desc`
+    )
+    .all() as any[];
 
-  const list = reviews || [];
   const avg = list.length ? (list.reduce((s, r) => s + r.stars, 0) / list.length).toFixed(1) : "0";
 
   return (
@@ -35,9 +39,9 @@ export default async function ReviewsPage() {
             <div key={r.id} className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
               <div className="flex justify-between mb-2">
                 <div>
-                  <div className="font-semibold text-sm">{r.customers?.name || "Anonymous"}</div>
+                  <div className="font-semibold text-sm">{r.customer_name || "Anonymous"}</div>
                   <div className="text-[10px] text-gray-400">
-                    {r.orders?.order_reference} • {new Date(r.created_at).toLocaleDateString("en-GB")}
+                    {r.order_reference} • {new Date(r.created_at).toLocaleDateString("en-GB")}
                   </div>
                 </div>
                 <div className="text-yellow-500">{"⭐".repeat(r.stars)}{"☆".repeat(5 - r.stars)}</div>

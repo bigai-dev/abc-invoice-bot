@@ -1,19 +1,11 @@
 import Link from "next/link";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { redirect } from "next/navigation";
+import { isAuthed } from "@/lib/auth";
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
-  const supabase = await createSupabaseServerClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const authed = await isAuthed();
 
-  // Login page itself bypasses this check via URL matching in the page
-  // (simpler than maze of route groups for a prototype)
-  if (!user) return <>{children}</>;
-
-  if (process.env.ADMIN_EMAIL && user.email !== process.env.ADMIN_EMAIL) {
-    await supabase.auth.signOut();
-    redirect("/admin?error=unauthorized");
-  }
+  // Login page itself bypasses the chrome
+  if (!authed) return <>{children}</>;
 
   return (
     <div className="min-h-screen flex">
@@ -36,7 +28,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
           <Link href="/admin/settings" className="block px-3 py-2.5 rounded-lg hover:bg-white/10">⚙️ Settings</Link>
         </nav>
         <div className="p-4 border-t border-gray-700 text-xs text-gray-400">
-          <div>{user.email}</div>
+          <div>Admin (local)</div>
           <form action="/admin/logout" method="post">
             <button type="submit" className="text-red-400 text-xs hover:underline mt-1">Sign out</button>
           </form>

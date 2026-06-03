@@ -8,7 +8,8 @@ import { findCustomerByChatId, upsertCustomer } from "./customers";
 import { listActiveProducts, getProductBySku } from "./products";
 import { createOrder, listCustomerOrders } from "./orders";
 import { generateInvoicePDF, uploadInvoiceToStorage } from "./pdf";
-import { createAdminClient } from "../supabase/admin";
+import { getDb, nextOrderRef } from "../db/client";
+import { saveFile, absoluteUrl } from "../storage/local";
 import type { BotState, CartItem } from "./types";
 
 type TgUpdate = any;
@@ -32,16 +33,13 @@ async function handleMessage(msg: any) {
   const text: string = msg.text || "";
   const state = await getSession(chatId);
 
-  // Photo upload = payment screenshot
   if (msg.photo && msg.photo.length) {
     return handlePaymentScreenshot(chatId, msg.photo[msg.photo.length - 1].file_id, false);
   }
-  // Any non-image doc/file upload = flag!
   if (msg.document) {
     return handlePaymentScreenshot(chatId, msg.document.file_id, true);
   }
 
-  // Commands
   if (text.startsWith("/start")) return cmdStart(chatId);
   if (text.startsWith("/menu") || text === "/home") return showMainMenu(chatId);
   if (text.startsWith("/cancel")) {
@@ -53,7 +51,6 @@ async function handleMessage(msg: any) {
   if (text.startsWith("/profile") || text.startsWith("/me")) return showProfile(chatId);
   if (text.startsWith("/help")) return cmdHelp(chatId);
 
-  // Collect profile fields
   if (state.step === "await_name") return saveName(chatId, text, state);
   if (state.step === "await_phone") return savePhone(chatId, text, state);
   if (state.step === "await_email") return saveEmail(chatId, text, state);
@@ -62,7 +59,6 @@ async function handleMessage(msg: any) {
   if (state.step === "await_return_reason") return saveReturnReason(chatId, text, state);
   if (state.step === "await_review_comment") return saveReviewComment(chatId, text, state);
 
-  // Natural-language fallback
   return smartReply(chatId, text);
 }
 
@@ -72,7 +68,6 @@ async function handleCallback(cb: any) {
   const data: string = cb.data;
   const messageId: number | undefined = cb.message?.message_id;
 
-  // Acknowledge immediately (stops the clock spinner on buttons)
   await fetch(
     `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`,
     {
@@ -91,12 +86,34 @@ async function handleCallback(cb: any) {
   if (data === "profile_confirm") return showMainMenu(chatId);
   if (data === "new_profile") return askName(chatId);
 
-  // Inline cart controls — edit the catalogue message in place
-  if (data.startsWith("inc:") || data.startsWith("dec:")) {
-    const sku = data.slice(4);
-    const delta = data.startsWith("inc:") ? 1 : -1;
-    await adjustCart(chatId, sku, delta);
+  if (data === "cat") {
     if (messageId) await updateCatalogueMessage(chatId, messageId);
+    return;
+  }
+  if (data.startsWith("pick:")) {
+    const sku = data.slice(5);
+    if (messageId) await showQtyPicker(chatId, messageId, sku);
+    return;
+  }
+  if (data.startsWith("set:")) {
+    const [, sku, nStr] = data.split(":");
+    if (nStr === "custom") {
+      const st = await getSession(chatId);
+      st.step = "await_qty";
+      st.selectedSku = sku;
+      await saveSession(chatId, st);
+      const p = await getProductBySku(sku);
+      await sendMessage(
+        chatId,
+        `Type the quantity for <b>${p?.name || sku}</b> (1–${p?.stock || 0}):`
+      );
+      return;
+    }
+    const n = parseInt(nStr, 10);
+    if (Number.isFinite(n)) {
+      await setCartQty(chatId, sku, n);
+      if (messageId) await updateCatalogueMessage(chatId, messageId);
+    }
     return;
   }
   if (data === "cart_clear") {
@@ -136,18 +153,18 @@ async function handleCallback(cb: any) {
   }
 }
 
-async function adjustCart(chatId: string, sku: string, delta: number) {
+async function setCartQty(chatId: string, sku: string, qty: number) {
   const p = await getProductBySku(sku);
   if (!p) return;
   const st = await getSession(chatId);
   st.cart = st.cart || [];
-  const existing = st.cart.find((c) => c.sku === sku);
-  if (delta > 0) {
-    if (!existing) st.cart.push({ sku, name: p.name, price: Number(p.price), qty: 1 });
-    else if (existing.qty < p.stock) existing.qty += 1;
-  } else if (delta < 0 && existing) {
-    existing.qty -= 1;
-    if (existing.qty <= 0) st.cart = st.cart.filter((c) => c.sku !== sku);
+  const capped = Math.max(0, Math.min(qty, p.stock));
+  if (capped === 0) {
+    st.cart = st.cart.filter((c) => c.sku !== sku);
+  } else {
+    const existing = st.cart.find((c) => c.sku === sku);
+    if (existing) existing.qty = capped;
+    else st.cart.push({ sku, name: p.name, price: Number(p.price), qty: capped });
   }
   await saveSession(chatId, st);
 }
@@ -198,52 +215,41 @@ async function askName(chatId: string) {
   await sendMessage(chatId, "Please share your details so we can deliver your orders.\n\n📝 What's your <b>full name</b>?");
 }
 
-async function saveName(chatId: string, text: string, state: BotState) {
+async function saveName(chatId: string, text: string, _state: BotState) {
   if (!text || text.length < 2) return sendMessage(chatId, "Please enter a valid name:");
-  state.step = "await_phone";
-  await saveSession(chatId, { ...state, });
-  await createAdminClient().from("bot_sessions").upsert({
-    telegram_chat_id: chatId,
-    state: { ...state, _tempName: text },
-    updated_at: new Date().toISOString(),
-  });
+  const st = await getSession(chatId);
+  st.step = "await_phone";
+  (st as any)._tempName = text;
+  await saveSession(chatId, st);
   await sendMessage(chatId, "Great! 👍\n\n📱 What's your <b>phone number</b>? (e.g. +60 12-345 6789)");
 }
 
-async function savePhone(chatId: string, text: string, state: BotState) {
+async function savePhone(chatId: string, text: string, _state: BotState) {
   if (!text || text.length < 6) return sendMessage(chatId, "Please enter a valid phone number:");
-  const current = (await createAdminClient().from("bot_sessions").select("state").eq("telegram_chat_id", chatId).single()).data?.state as any;
-  current._tempPhone = text;
-  current.step = "await_email";
-  await createAdminClient().from("bot_sessions").upsert({
-    telegram_chat_id: chatId,
-    state: current,
-    updated_at: new Date().toISOString(),
-  });
+  const st: any = await getSession(chatId);
+  st.step = "await_email";
+  st._tempPhone = text;
+  await saveSession(chatId, st);
   await sendMessage(chatId, "📧 What's your <b>email address</b>?");
 }
 
-async function saveEmail(chatId: string, text: string, state: BotState) {
+async function saveEmail(chatId: string, text: string, _state: BotState) {
   if (!/^\S+@\S+\.\S+$/.test(text)) return sendMessage(chatId, "Please enter a valid email:");
-  const current = (await createAdminClient().from("bot_sessions").select("state").eq("telegram_chat_id", chatId).single()).data?.state as any;
-  current._tempEmail = text;
-  current.step = "await_address";
-  await createAdminClient().from("bot_sessions").upsert({
-    telegram_chat_id: chatId,
-    state: current,
-    updated_at: new Date().toISOString(),
-  });
+  const st: any = await getSession(chatId);
+  st.step = "await_address";
+  st._tempEmail = text;
+  await saveSession(chatId, st);
   await sendMessage(chatId, "📍 What's your <b>delivery address</b>?");
 }
 
-async function saveAddress(chatId: string, text: string, state: BotState) {
+async function saveAddress(chatId: string, text: string, _state: BotState) {
   if (!text || text.length < 10) return sendMessage(chatId, "Please enter a complete address:");
-  const current = (await createAdminClient().from("bot_sessions").select("state").eq("telegram_chat_id", chatId).single()).data?.state as any;
+  const st: any = await getSession(chatId);
   const customer = await upsertCustomer({
     chatId,
-    name: current._tempName,
-    phone: current._tempPhone,
-    email: current._tempEmail,
+    name: st._tempName,
+    phone: st._tempPhone,
+    email: st._tempEmail,
     address: text,
   });
   await clearSession(chatId);
@@ -277,7 +283,6 @@ async function showProfile(chatId: string) {
   );
 }
 
-// Short display names for products (keeps buttons readable)
 function shortName(name: string) {
   return name
     .replace(/^Premium\s+/i, "")
@@ -291,7 +296,6 @@ async function renderCatalogue(chatId: string) {
   const st = await getSession(chatId);
   const cart = st.cart || [];
 
-  // Build message text
   let text = "🛍️ <b>Our Products</b>\n\n";
   if (cart.length) {
     text += "<b>🛒 Your Cart:</b>\n";
@@ -299,26 +303,23 @@ async function renderCatalogue(chatId: string) {
     const sub = cart.reduce((s, c) => s + c.price * c.qty, 0);
     text += `\n<b>Subtotal: RM ${sub.toFixed(2)}</b>\n\n`;
   } else {
-    text += "<i>Cart is empty. Tap + to add items.</i>\n\n";
+    text += "<i>Cart is empty.</i>\n\n";
   }
-  text += "Use − / + to adjust quantities.";
+  text += "Tap a product to set quantity.";
 
-  // Build keyboard — 2 rows per product:
-  // Row 1: [Name — Price] (display only, no-op)
-  // Row 2: [−] [qty] [+]
   const rows: { text: string; data: string }[][] = [];
   for (const p of products) {
     const qty = cart.find((c) => c.sku === p.sku)?.qty || 0;
     const stockMark = p.stock === 0 ? " ❌" : p.stock < 5 ? ` ⚠${p.stock}` : "";
-    rows.push([{ text: `${shortName(p.name)} — RM ${Number(p.price).toFixed(0)}${stockMark}`, data: `noop` }]);
+    const qtyMark = qty > 0 ? ` ✓×${qty}` : "";
     rows.push([
-      { text: "➖", data: `dec:${p.sku}` },
-      { text: String(qty), data: `noop` },
-      { text: "➕", data: `inc:${p.sku}` },
+      {
+        text: `${shortName(p.name)} — RM ${Number(p.price).toFixed(0)}${qtyMark}${stockMark}`,
+        data: p.stock === 0 ? "noop" : `pick:${p.sku}`,
+      },
     ]);
   }
 
-  // Footer
   if (cart.length) {
     rows.push([
       { text: "✅ Checkout", data: "checkout" },
@@ -340,73 +341,65 @@ async function updateCatalogueMessage(chatId: string, messageId: number) {
   await editMessageText(chatId, messageId, text, { reply_markup });
 }
 
-async function askQty(chatId: string, sku: string) {
+async function showQtyPicker(chatId: string, messageId: number, sku: string) {
   const p = await getProductBySku(sku);
-  if (!p || p.stock === 0) return sendMessage(chatId, "Sorry, that product is out of stock.");
+  if (!p) return;
   const st = await getSession(chatId);
-  st.selectedSku = sku;
-  await saveSession(chatId, st);
-  const maxBtn = Math.min(5, p.stock);
-  const qtyBtns: { text: string; data: string }[][] = [];
-  const row: { text: string; data: string }[] = [];
-  for (let i = 1; i <= maxBtn; i++) row.push({ text: String(i), data: `qty:${sku}:${i}` });
-  qtyBtns.push(row);
-  qtyBtns.push([{ text: "Other", data: "qty_other" }]);
-  await sendMessage(chatId, `<b>${p.name}</b>\nRM ${p.price.toFixed(2)} each — ${p.stock} in stock\n\nHow many?`, {
-    reply_markup: inlineKeyboard(qtyBtns),
-  });
+  const cur = (st.cart || []).find((c) => c.sku === sku)?.qty || 0;
+
+  const text =
+    `🛍️ <b>${p.name}</b>\n\n` +
+    `Price: RM ${Number(p.price).toFixed(2)} each\n` +
+    `Stock: ${p.stock}\n` +
+    `Currently in cart: <b>${cur}</b>\n\n` +
+    `<i>Tap a number to set the quantity.</i>`;
+
+  // Quick-pick numbers — capped to stock; 0 = remove
+  const presets = [0, 1, 2, 3, 5, 10, 15, 20].filter((n) => n === 0 || n <= p.stock);
+  const rows: { text: string; data: string }[][] = [];
+  for (let i = 0; i < presets.length; i += 4) {
+    rows.push(
+      presets.slice(i, i + 4).map((n) => ({
+        text: n === cur ? `• ${n} •` : String(n),
+        data: `set:${sku}:${n}`,
+      }))
+    );
+  }
+  rows.push([
+    { text: "✏️ Type", data: `set:${sku}:custom` },
+    { text: "🔙 Back", data: "cat" },
+  ]);
+
+  await editMessageText(chatId, messageId, text, { reply_markup: inlineKeyboard(rows) });
 }
 
 async function saveCustomQty(chatId: string, text: string, state: BotState) {
   const qty = parseInt(text);
-  if (isNaN(qty) || qty < 1) return sendMessage(chatId, "Please enter a valid number:");
+  if (isNaN(qty) || qty < 0) return sendMessage(chatId, "Please enter a valid number (0 to remove):");
   if (!state.selectedSku) return sendMessage(chatId, "Please pick a product first. /shop");
   const p = await getProductBySku(state.selectedSku);
   if (!p) return sendMessage(chatId, "Product not found.");
   if (qty > p.stock) return sendMessage(chatId, `Only ${p.stock} in stock. Please enter a smaller number:`);
-  state.step = "idle";
-  await saveSession(chatId, state);
-  return addToCart(chatId, state.selectedSku, qty);
-}
-
-async function addToCart(chatId: string, sku: string, qty: number) {
-  const p = await getProductBySku(sku);
-  if (!p) return;
+  await setCartQty(chatId, state.selectedSku, qty);
   const st = await getSession(chatId);
-  st.cart = st.cart || [];
-  const existing = st.cart.find((i) => i.sku === sku);
-  if (existing) existing.qty += qty;
-  else st.cart.push({ sku, name: p.name, price: Number(p.price), qty });
   st.step = "idle";
+  st.selectedSku = undefined;
   await saveSession(chatId, st);
-
-  const subtotal = st.cart.reduce((s, c) => s + c.price * c.qty, 0);
-  let text = "🛒 <b>Your Cart:</b>\n\n";
-  for (const c of st.cart) text += `• ${c.name} ×${c.qty} — RM ${(c.price * c.qty).toFixed(2)}\n`;
-  text += `\n<b>Subtotal: RM ${subtotal.toFixed(2)}</b>`;
-
-  await sendMessage(chatId, text, {
-    reply_markup: inlineKeyboard([
-      [{ text: "➕ Add More", data: "shop" }],
-      [{ text: "✅ Checkout", data: "checkout" }],
-      [{ text: "🧹 Clear Cart", data: "cart_clear" }],
-    ]),
-  });
+  return showCatalogue(chatId);
 }
 
 async function checkout(chatId: string) {
   const st = await getSession(chatId);
   if (!st.cart || !st.cart.length) return sendMessage(chatId, "Your cart is empty. /shop to start.");
-  const supabase = createAdminClient();
-  const { data: settings } = await supabase.from("invoice_settings").select("*").eq("id", 1).single();
+  const db = getDb();
+  const settings = db.prepare(`select * from invoice_settings where id = 1`).get() as any;
   const sstRate = Number(settings?.sst_rate || 0.08);
   const base = st.cart.reduce((s, c) => s + c.price * c.qty, 0);
   const sst = +(base * sstRate).toFixed(2);
   const total = +(base + sst).toFixed(2);
 
-  // Generate ref preview (not committed yet)
-  const { data: refData } = await supabase.rpc("next_order_ref");
-  st.lastOrderRef = refData as string;
+  // Preview the next ref (not yet committed)
+  st.lastOrderRef = nextOrderRef();
   await saveSession(chatId, st);
 
   await sendMessage(
@@ -429,26 +422,22 @@ async function handlePaymentScreenshot(chatId: string, fileId: string, flagged: 
   const customer = await findCustomerByChatId(chatId);
   if (!customer) return sendMessage(chatId, "Please complete your profile first. /start");
 
-  // Download & upload to Supabase Storage
+  // Download from Telegram, save to local storage
   let screenshotUrl: string | undefined;
   try {
     const fileInfo = await getFile(fileId);
     if (fileInfo.file_path) {
       const buf = await downloadFile(fileInfo.file_path);
-      const path = `${chatId}-${Date.now()}.${fileInfo.file_path.split(".").pop() || "jpg"}`;
-      const supabase = createAdminClient();
-      await supabase.storage.from("screenshots").upload(path, buf, {
-        contentType: flagged ? "application/octet-stream" : "image/jpeg",
-      });
-      const { data: signed } = await supabase.storage.from("screenshots").createSignedUrl(path, 60 * 60 * 24 * 30);
-      screenshotUrl = signed?.signedUrl;
+      const ext = fileInfo.file_path.split(".").pop() || "jpg";
+      const name = `${chatId}-${Date.now()}.${ext}`;
+      screenshotUrl = await saveFile("screenshots", name, buf);
     }
   } catch (e) {
     console.error("Screenshot upload failed", e);
   }
 
-  const supabase = createAdminClient();
-  const { data: settings } = await supabase.from("invoice_settings").select("*").eq("id", 1).single();
+  const db = getDb();
+  const settings = db.prepare(`select * from invoice_settings where id = 1`).get() as any;
   const sstRate = Number(settings?.sst_rate || 0.08);
 
   const { order, base, sst, total, orderRef, invoiceNo } = await createOrder({
@@ -460,10 +449,11 @@ async function handlePaymentScreenshot(chatId: string, fileId: string, flagged: 
     screenshotUrl,
   });
 
-  // Clear cart
+  // Snapshot the cart for invoice rendering BEFORE clearing
+  const cartSnapshot = [...st.cart];
+
   st.cart = [];
   st.lastOrderRef = orderRef;
-  st.lastOrderId = order.id;
   await saveSession(chatId, st);
 
   if (flagged) {
@@ -477,20 +467,18 @@ async function handlePaymentScreenshot(chatId: string, fileId: string, flagged: 
 
   await sendMessage(chatId, "✅ <b>Payment received!</b> Generating your invoice...");
 
-  // Generate PDF
   try {
     const pdfBytes = await generateInvoicePDF({
       orderRef,
       invoiceNo: invoiceNo!,
       customer: { name: customer.name, phone: customer.phone, email: customer.email, address: customer.address },
-      items: st.cart.length ? st.cart : (await listCustomerOrders(chatId))[0].order_items.map((it: any) => ({
-        name: it.product_name, sku: it.sku, price: Number(it.unit_price), qty: it.quantity,
-      })),
+      items: cartSnapshot,
       base, sst, total,
     });
-    const url = await uploadInvoiceToStorage(order.id, pdfBytes);
-    await supabase.from("orders").update({ invoice_pdf_url: url }).eq("id", order.id);
-    await sendDocument(chatId, url, `📄 Invoice ${invoiceNo}`);
+    const relativeUrl = await uploadInvoiceToStorage(order.id, pdfBytes);
+    db.prepare(`update orders set invoice_pdf_url = ? where id = ?`).run(relativeUrl, order.id);
+    // Telegram needs a publicly-fetchable URL
+    await sendDocument(chatId, absoluteUrl(relativeUrl), `📄 Invoice ${invoiceNo}`);
   } catch (e) {
     console.error("PDF generation failed", e);
     await sendMessage(chatId, "Invoice is being finalized — it will arrive shortly.");
@@ -521,28 +509,25 @@ async function showMyOrders(chatId: string) {
 }
 
 async function submitRating(chatId: string, orderId: string, stars: number) {
-  const supabase = createAdminClient();
+  const db = getDb();
   const customer = await findCustomerByChatId(chatId);
-  // Check if already reviewed
-  const { data: existing } = await supabase.from("reviews").select("id").eq("order_id", orderId).maybeSingle();
+
+  const existing = db
+    .prepare(`select id from reviews where order_id = ?`)
+    .get(orderId) as { id: string } | undefined;
   if (existing) {
     await sendMessage(chatId, "You've already reviewed this order. Thank you! 🙏");
     return;
   }
-  const { data: review } = await supabase
-    .from("reviews")
-    .insert({
-      order_id: orderId,
-      customer_id: customer?.id || null,
-      stars,
-      comment: "",
-    })
-    .select()
-    .single();
+
+  const reviewId = crypto.randomUUID();
+  db.prepare(
+    `insert into reviews (id, order_id, customer_id, stars, comment, created_at) values (?, ?, ?, ?, ?, ?)`
+  ).run(reviewId, orderId, customer?.id ?? null, stars, "", new Date().toISOString());
 
   const st = await getSession(chatId);
   st.step = "await_review_comment";
-  st.pendingReviewId = review?.id;
+  st.pendingReviewId = reviewId;
   await saveSession(chatId, st);
 
   await sendMessage(
@@ -556,8 +541,8 @@ async function submitRating(chatId: string, orderId: string, stars: number) {
 
 async function saveReviewComment(chatId: string, text: string, state: BotState) {
   if (!state.pendingReviewId) return;
-  const supabase = createAdminClient();
-  await supabase.from("reviews").update({ comment: text.slice(0, 500) }).eq("id", state.pendingReviewId);
+  const db = getDb();
+  db.prepare(`update reviews set comment = ? where id = ?`).run(text.slice(0, 500), state.pendingReviewId);
   const st = await getSession(chatId);
   st.step = "idle";
   st.pendingReviewId = undefined;
@@ -568,12 +553,11 @@ async function saveReviewComment(chatId: string, text: string, state: BotState) 
 
 async function saveReturnReason(chatId: string, text: string, state: BotState) {
   if (!state.lastOrderRef) return;
-  const supabase = createAdminClient();
-  await supabase.from("orders").update({
-    return_status: "requested",
-    return_reason: text.slice(0, 100),
-    return_details: text,
-  }).eq("order_reference", state.lastOrderRef);
+  const db = getDb();
+  db.prepare(
+    `update orders set return_status = 'requested', return_reason = ?, return_details = ?
+     where order_reference = ?`
+  ).run(text.slice(0, 100), text, state.lastOrderRef);
   await clearSession(chatId);
   await sendMessage(chatId, `↩️ Return request submitted for <b>${state.lastOrderRef}</b>. Our team will review within 1–2 working days. 🙏`);
   await showMainMenu(chatId);
@@ -597,8 +581,8 @@ async function smartReply(chatId: string, text: string) {
     return sendMessage(chatId, "📦 We ship within 1–3 working days after payment. Tap /orders to track.");
   }
   if (/bank|pay|bayar/.test(t)) {
-    const s = await createAdminClient().from("invoice_settings").select("*").eq("id", 1).single();
-    return sendMessage(chatId, `🏦 Bank: ${s.data?.bank_name}\nAccount: ${s.data?.bank_account}\nName: ${s.data?.bank_holder}`);
+    const s = getDb().prepare(`select * from invoice_settings where id = 1`).get() as any;
+    return sendMessage(chatId, `🏦 Bank: ${s?.bank_name}\nAccount: ${s?.bank_account}\nName: ${s?.bank_holder}`);
   }
   await sendMessage(chatId, "🤔 I didn't understand. Type /help for commands, or pick an option:");
   await showMainMenu(chatId);

@@ -1,13 +1,10 @@
-import { createAdminClient } from "../supabase/admin";
+import { getDb } from "../db/client";
 
 export async function findCustomerByChatId(chatId: string) {
-  const supabase = createAdminClient();
-  const { data } = await supabase
-    .from("customers")
-    .select("*")
-    .eq("telegram_chat_id", chatId)
-    .maybeSingle();
-  return data;
+  const db = getDb();
+  return db
+    .prepare(`select * from customers where telegram_chat_id = ?`)
+    .get(chatId) as any | undefined;
 }
 
 export async function upsertCustomer(input: {
@@ -17,22 +14,30 @@ export async function upsertCustomer(input: {
   email: string;
   address: string;
 }) {
-  const supabase = createAdminClient();
-  const { data, error } = await supabase
-    .from("customers")
-    .upsert(
-      {
-        telegram_chat_id: input.chatId,
-        name: input.name,
-        phone: input.phone,
-        email: input.email,
-        address: input.address,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "telegram_chat_id" }
-    )
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
+  const db = getDb();
+  const now = new Date().toISOString();
+  const existing = await findCustomerByChatId(input.chatId);
+  if (existing) {
+    db.prepare(
+      `update customers set name = ?, phone = ?, email = ?, address = ?, updated_at = ?
+       where telegram_chat_id = ?`
+    ).run(input.name, input.phone, input.email, input.address, now, input.chatId);
+    return { ...existing, name: input.name, phone: input.phone, email: input.email, address: input.address, updated_at: now };
+  }
+  const id = crypto.randomUUID();
+  db.prepare(
+    `insert into customers (id, telegram_chat_id, name, phone, email, address, created_at, updated_at)
+     values (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, input.chatId, input.name, input.phone, input.email, input.address, now, now);
+  return {
+    id,
+    telegram_chat_id: input.chatId,
+    name: input.name,
+    phone: input.phone,
+    email: input.email,
+    address: input.address,
+    preferred_language: "en",
+    created_at: now,
+    updated_at: now,
+  };
 }

@@ -1,16 +1,16 @@
 # ABC Sdn Bhd — Automated Invoice Generator
 
-Production-ready Next.js + Supabase + Telegram bot for automated order management.
+Local-first Next.js + SQLite + Telegram bot demo. **Zero cloud services required.**
 
 ## Tech Stack
 - **Next.js 15** (App Router, TypeScript)
 - **Tailwind CSS**
-- **Supabase** (PostgreSQL + Auth + Storage)
+- **SQLite** via `better-sqlite3` (single-file local database)
 - **Telegram Bot API** (webhook mode)
 - **pdf-lib** (invoice generation)
-- **Vercel** (hosting)
+- Local filesystem for uploads (no S3/Storage service)
 
-## 🚀 Setup Steps (IN ORDER)
+## 🚀 Setup
 
 ### 1. Install dependencies
 ```bash
@@ -18,141 +18,85 @@ cd abc-invoice-app
 npm install
 ```
 
-### 2. Run SQL in Supabase
-1. Open https://supabase.com/dashboard → your project
-2. Click **SQL Editor** in sidebar → **New query**
-3. Open `supabase/schema.sql` in this project
-4. Copy entire contents → paste into Supabase SQL editor
-5. Click **Run**
-6. Verify: open **Table Editor** → you should see `customers`, `orders`, `products` (with 8 rows), etc.
+### 2. Create `.env.local`
+Copy `.env.example` → `.env.local` and fill in:
+```
+ADMIN_PASSWORD=admin                      # change this!
+SESSION_SECRET=any-long-random-string     # 32+ chars recommended
+TELEGRAM_BOT_TOKEN=...                    # from @BotFather
+TELEGRAM_WEBHOOK_SECRET=...               # any random string
+NEXT_PUBLIC_APP_URL=http://localhost:3000 # or your tunnel URL (see below)
+```
 
-### 3. Create Storage buckets (manually in Supabase)
-1. Go to **Storage** in Supabase sidebar → **New bucket**
-2. Create **3 buckets**:
-   - `screenshots` — **Private**
-   - `invoices` — **Private**
-   - `logos` — **Public**
-
-### 4. Enable Email Auth (for admin login)
-1. Go to **Authentication → Providers** in Supabase
-2. Ensure **Email** is enabled (it is by default)
-3. Go to **Authentication → URL Configuration**
-4. Add your site URL to **Site URL** and **Redirect URLs**:
-   - For local: `http://localhost:3000`
-   - After deploy: `https://your-app.vercel.app`
-
-### 5. Local test (optional but recommended)
+### 3. Run it
 ```bash
 npm run dev
 ```
-Open http://localhost:3000 → you'll be redirected to `/admin` login page.
-Enter your admin email (`abc@abc.com` or whatever you set as `ADMIN_EMAIL`). Check your email for magic link.
+- Open http://localhost:3000 → redirects to `/admin`.
+- Sign in with the password you set in `.env.local`.
+- The SQLite database (`data.db`) and `storage/` folder are created automatically on first run, with 8 seeded products.
 
-**Note:** Telegram webhooks can't reach `localhost`. For full bot testing, deploy to Vercel first (Step 6).
+That's it for the admin UI. **For the Telegram bot you need a public URL** (next step).
 
-### 6. Deploy to Vercel
+### 4. Telegram bot (optional, for the bot side)
 
-**Option A — via GitHub (recommended):**
+Telegram webhooks can't reach `localhost`. Use a tunnel:
+
+**ngrok** (https://ngrok.com):
 ```bash
-git init
-git add .
-git commit -m "Initial commit"
-gh repo create abc-invoice-app --private --source=. --push
+ngrok http 3000
 ```
-Then go to https://vercel.com → **Add New** → **Project** → import the repo.
-
-**Option B — via CLI:**
-```bash
-npm i -g vercel
-vercel login
-vercel --prod
-```
-
-### 7. Set environment variables on Vercel
-In Vercel dashboard → your project → **Settings → Environment Variables** add all from `.env.local`:
-- `NEXT_PUBLIC_SUPABASE_URL`
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_WEBHOOK_SECRET`
-- `NEXT_PUBLIC_APP_URL` ← **set to your Vercel URL** (e.g. `https://abc-invoice.vercel.app`)
-- `ADMIN_EMAIL`
-
-Then **Redeploy** to apply.
-
-### 8. Register Telegram webhook
-Update `.env.local` — set `NEXT_PUBLIC_APP_URL` to your live Vercel URL, then:
+Take the `https://xxxx.ngrok-free.app` URL, set it as `NEXT_PUBLIC_APP_URL` in `.env.local`, restart `npm run dev`, then:
 ```bash
 npm run webhook:set
 ```
-
 You should see `✅ Webhook set to: https://…/api/telegram/webhook`.
 
-### 9. Test via Telegram
-1. Open Telegram → search for your bot (`@abc_sdn_bhd_bot` or similar)
-2. Send `/start`
-3. Complete onboarding → browse products → checkout → upload screenshot
-4. Log into `/admin` on your Vercel URL to see the order appear!
+**Cloudflare Tunnel** (free, no signup):
+```bash
+cloudflared tunnel --url http://localhost:3000
+```
 
-## Project Structure
+Then test in Telegram: send `/start` to your bot.
+
+## What's where
 ```
 app/
-├── admin/                   # Dashboard (login-protected)
-│   ├── page.tsx             # Analytics overview
+├── admin/                   # Dashboard (password-protected)
+│   ├── page.tsx             # Analytics + login form
+│   ├── login/route.ts       # POST password → set cookie
+│   ├── logout/route.ts      # Clear cookie
 │   ├── orders/              # Kanban board
-│   ├── products/            # Product list
+│   ├── products/            # Product list (inline edit)
 │   ├── reviews/             # Reviews
 │   ├── audit/               # Audit log
-│   ├── settings/            # Editable settings
-│   └── layout.tsx           # Sidebar + auth guard
+│   └── settings/            # Editable settings
 ├── api/
 │   ├── telegram/webhook/    # Telegram → bot handler
 │   ├── orders/[id]/action/  # Admin order actions
-│   └── settings/            # Save settings
+│   ├── products/[id]/       # Admin product edits
+│   ├── settings/            # Save settings
+│   └── files/[bucket]/[name]/  # Serves files from ./storage/
 └── page.tsx                 # Redirects to /admin
 
 lib/
-├── bot/                     # Bot logic
-│   ├── handler.ts           # Main update router
-│   ├── telegram.ts          # TG API wrapper
-│   ├── session.ts           # Supabase-backed sessions
-│   ├── customers.ts         # Customer CRUD
-│   ├── products.ts          # Product queries
-│   ├── orders.ts            # Order creation
-│   └── pdf.ts               # Invoice PDF
-└── supabase/
-    ├── admin.ts             # Service role client (server)
-    ├── browser.ts           # Anon client (browser)
-    └── server.ts            # SSR client (with cookies)
-
-supabase/
-└── schema.sql               # Full DB schema
+├── auth.ts                  # Password + signed-cookie session
+├── db/
+│   └── client.ts            # SQLite connection, schema init, seed, helpers
+├── storage/
+│   └── local.ts             # Save/read files in ./storage/<bucket>/
+└── bot/                     # Bot logic (handler, sessions, customers, orders, pdf)
 
 scripts/
 ├── set-webhook.mjs          # Register Telegram webhook
 └── delete-webhook.mjs       # Remove webhook
 ```
 
-## Common issues
+## Resetting the demo
+```bash
+rm -f data.db data.db-* && rm -rf storage/
+```
+Next `npm run dev` will re-create + re-seed everything.
 
-**"Bot doesn't respond"** — Check:
-1. `npm run webhook:set` succeeded
-2. `NEXT_PUBLIC_APP_URL` in `.env.local` is the Vercel URL (not localhost)
-3. All env vars set on Vercel and redeployed
-4. Check Vercel logs → Functions → `/api/telegram/webhook`
-
-**"Can't log into admin"** — Check:
-1. `ADMIN_EMAIL` matches what you enter
-2. Supabase → Authentication → URL Configuration has your Vercel URL
-3. Check email spam folder for magic link
-
-**"Orders not saving"** — Check:
-1. SQL schema ran successfully (Tables exist)
-2. `SUPABASE_SERVICE_ROLE_KEY` is correct
-3. Vercel function logs for the actual error
-
-## Rotate bot token (after testing)
-1. Telegram → `@BotFather` → `/revoke`
-2. Select your bot → get new token
-3. Update `TELEGRAM_BOT_TOKEN` in Vercel env vars + `.env.local`
-4. Redeploy + `npm run webhook:set`
+## Deployment notes
+This setup is **for local demos**. Production-ready hosting needs persistent storage/disk, since SQLite + filesystem are not ephemeral-safe. For a real deploy, swap `lib/db/client.ts` and `lib/storage/local.ts` for a hosted database and object store.

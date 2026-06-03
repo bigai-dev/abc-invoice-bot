@@ -1,10 +1,12 @@
-import { createAdminClient } from "@/lib/supabase/admin";
+import { getDb } from "@/lib/db/client";
 
 export const dynamic = "force-dynamic";
 
 export default async function AuditPage() {
-  const admin = createAdminClient();
-  const { data: log } = await admin.from("audit_log").select("*").order("created_at", { ascending: false }).limit(200);
+  const db = getDb();
+  const log = db
+    .prepare(`select * from audit_log order by created_at desc limit 200`)
+    .all() as any[];
 
   const icons: Record<string, string> = {
     "Order approved": "✅", "Order cancelled": "🚫", "Delivery updated": "📦",
@@ -15,10 +17,10 @@ export default async function AuditPage() {
     <div>
       <h1 className="text-2xl font-bold mb-6">Audit Log 📜</h1>
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 divide-y divide-gray-100">
-        {(log || []).length === 0 ? (
+        {log.length === 0 ? (
           <div className="p-10 text-center text-gray-400 text-sm">No admin actions recorded yet.</div>
         ) : (
-          (log || []).map((e: any) => (
+          log.map((e: any) => (
             <div key={e.id} className="p-4 hover:bg-gray-50 flex items-start gap-3">
               <div className="text-xl">{icons[e.action] || "•"}</div>
               <div className="flex-1">

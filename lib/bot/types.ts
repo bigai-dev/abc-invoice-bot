@@ -18,7 +18,6 @@ export type BotState = {
     | "await_review_comment";
   cart?: CartItem[];
   lastOrderRef?: string;
-  lastOrderId?: string;
   selectedSku?: string;
   pendingReviewId?: string;
 };

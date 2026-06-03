@@ -1,36 +1,53 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getDb } from "@/lib/db/client";
+import { isAuthed, ADMIN_ACTOR } from "@/lib/auth";
+
+export const runtime = "nodejs";
+
+const ALLOWED = new Set(["name", "sku", "price", "cost", "stock", "is_active", "description"]);
 
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
-  const supabase = await createSupabaseServerClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user || (process.env.ADMIN_EMAIL && user.email !== process.env.ADMIN_EMAIL)) {
+  if (!(await isAuthed())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const { id } = await ctx.params;
   const body = await req.json();
-  // Whitelist fields
-  const allowed = ["name", "sku", "price", "cost", "stock", "is_active", "description"];
-  const update: any = {};
-  for (const key of allowed) if (body[key] !== undefined) update[key] = body[key];
-  update.updated_at = new Date().toISOString();
 
-  const admin = createAdminClient();
-  const { data: before } = await admin.from("products").select("*").eq("id", id).single();
-  const { error } = await admin.from("products").update(update).eq("id", id);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  const updates: [string, any][] = [];
+  for (const k of Object.keys(body)) {
+    if (!ALLOWED.has(k)) continue;
+    let v = body[k];
+    if (k === "is_active") v = v ? 1 : 0;
+    updates.push([k, v]);
+  }
+  if (updates.length === 0) {
+    return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
+  }
 
-  // Audit log
-  const changes = Object.keys(update)
-    .filter((k) => k !== "updated_at")
-    .map((k) => `${k}: ${before?.[k]} → ${update[k]}`)
+  const db = getDb();
+  const before = db.prepare(`select * from products where id = ?`).get(id) as any | undefined;
+  if (!before) return NextResponse.json({ error: "Product not found" }, { status: 404 });
+
+  const setClause = updates.map(([k]) => `${k} = ?`).join(", ");
+  const values = updates.map(([, v]) => v);
+  db.prepare(`update products set ${setClause}, updated_at = ? where id = ?`).run(
+    ...values,
+    new Date().toISOString(),
+    id
+  );
+
+  const changes = updates
+    .map(([k, v]) => `${k}: ${k === "is_active" ? !!before[k] : before[k]} → ${k === "is_active" ? !!v : v}`)
     .join(", ");
-  await admin.from("audit_log").insert({
-    actor: user.email!,
-    action: "Product edited",
-    details: `${before?.name || id} — ${changes}`,
-  });
+  db.prepare(
+    `insert into audit_log (id, actor, action, details, created_at) values (?, ?, ?, ?, ?)`
+  ).run(
+    crypto.randomUUID(),
+    ADMIN_ACTOR,
+    "Product edited",
+    `${before.name || id} — ${changes}`,
+    new Date().toISOString()
+  );
 
   return NextResponse.json({ ok: true });
 }
