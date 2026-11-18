@@ -51,3 +51,30 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
   return NextResponse.json({ ok: true });
 }
+
+// Delete a product. Past orders are unaffected — order lines keep their own
+// snapshot of the product name/SKU/price (product_id becomes null via FK rule).
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  if (!(await isAuthed())) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const { id } = await ctx.params;
+  const db = getDb();
+
+  const product = db.prepare(`select * from products where id = ?`).get(id) as any | undefined;
+  if (!product) return NextResponse.json({ error: "Product not found" }, { status: 404 });
+
+  db.prepare(`delete from products where id = ?`).run(id);
+
+  db.prepare(
+    `insert into audit_log (id, actor, action, details, created_at) values (?, ?, ?, ?, ?)`
+  ).run(
+    crypto.randomUUID(),
+    ADMIN_ACTOR,
+    "Product deleted",
+    `${product.name} (${product.sku})`,
+    new Date().toISOString()
+  );
+
+  return NextResponse.json({ ok: true });
+}

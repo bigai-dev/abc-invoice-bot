@@ -33,17 +33,28 @@ export async function sendMessage(
   });
 }
 
+// Upload the file bytes straight to Telegram (multipart) — more reliable than
+// handing Telegram a URL to fetch, which times out on slow tunnels.
 export async function sendDocument(
   chatId: string | number,
-  fileUrl: string,
+  filename: string,
+  data: Uint8Array,
   caption?: string
 ) {
-  return tg("sendDocument", {
-    chat_id: chatId,
-    document: fileUrl,
-    caption,
-    parse_mode: "HTML",
-  });
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  if (caption) {
+    form.append("caption", caption);
+    form.append("parse_mode", "HTML");
+  }
+  form.append("document", new Blob([data as BlobPart], { type: "application/pdf" }), filename);
+  const res = await fetch(`${TG_API}/sendDocument`, { method: "POST", body: form });
+  const j = await res.json();
+  if (!j.ok) {
+    console.error(`[TG sendDocument failed]`, j);
+    throw new Error(j.description || "Telegram API error");
+  }
+  return j.result;
 }
 
 export async function sendPhoto(chatId: string | number, photo: string, caption?: string) {
@@ -61,10 +72,13 @@ export async function downloadFile(filePath: string): Promise<ArrayBuffer> {
 }
 
 // === Inline keyboard helpers ===
-export function inlineKeyboard(rows: { text: string; data: string }[][]) {
+// Buttons either trigger a callback (`data`) or open a link (`url`), e.g. a Stripe payment page.
+export function inlineKeyboard(rows: { text: string; data?: string; url?: string }[][]) {
   return {
     inline_keyboard: rows.map((row) =>
-      row.map((b) => ({ text: b.text, callback_data: b.data }))
+      row.map((b) =>
+        b.url ? { text: b.text, url: b.url } : { text: b.text, callback_data: b.data }
+      )
     ),
   };
 }

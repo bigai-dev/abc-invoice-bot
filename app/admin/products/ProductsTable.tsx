@@ -3,11 +3,16 @@ import { useState } from "react";
 
 type Product = any;
 
+const EMPTY_FORM = { name: "", sku: "", price: "", cost: "", stock: "" };
+
 export default function ProductsTable({ initialProducts }: { initialProducts: Product[] }) {
   const [products, setProducts] = useState<Product[]>(initialProducts);
   const [editing, setEditing] = useState<{ id: string; field: string } | null>(null);
   const [editValue, setEditValue] = useState<string>("");
   const [toast, setToast] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
+  const [form, setForm] = useState({ ...EMPTY_FORM });
+  const [saving, setSaving] = useState(false);
 
   function showToast(msg: string) {
     setToast(msg);
@@ -53,6 +58,60 @@ export default function ProductsTable({ initialProducts }: { initialProducts: Pr
     setEditing(null);
   }
 
+  function renameProduct(p: Product) {
+    const next = prompt("Product name:", p.name);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (trimmed.length < 2) return showToast("Name too short");
+    updateProduct(p.id, "name", trimmed);
+  }
+
+  async function deleteProduct(p: Product) {
+    if (!confirm(`Delete "${p.name}"?\n\nIt disappears from the shop immediately. Past orders are not affected.`)) return;
+    const prev = products;
+    setProducts(products.filter((x) => x.id !== p.id));
+    try {
+      const res = await fetch(`/api/products/${p.id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await res.text());
+      showToast(`✓ "${p.name}" deleted`);
+    } catch (err) {
+      console.error(err);
+      setProducts(prev);
+      showToast("✗ Delete failed — restored");
+    }
+  }
+
+  async function createProduct() {
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/products`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: form.name,
+          sku: form.sku,
+          price: Number(form.price),
+          cost: Number(form.cost || 0),
+          stock: parseInt(form.stock || "0", 10),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(`✗ ${data.error || "Could not add product"}`);
+        return;
+      }
+      setProducts([...products, data.product].sort((a, b) => String(a.name).localeCompare(String(b.name))));
+      setShowAdd(false);
+      setForm({ ...EMPTY_FORM });
+      showToast(`✓ "${data.product.name}" added`);
+    } catch (err) {
+      console.error(err);
+      showToast("✗ Could not add product");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <>
       {toast && (
@@ -60,6 +119,15 @@ export default function ProductsTable({ initialProducts }: { initialProducts: Pr
           {toast}
         </div>
       )}
+
+      <div className="flex justify-end mb-4">
+        <button
+          onClick={() => setShowAdd(true)}
+          className="bg-green-600 hover:bg-green-700 active:scale-95 text-white text-sm font-semibold px-4 py-2 rounded-lg shadow-sm transition"
+        >
+          ＋ Add Product
+        </button>
+      </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <table className="w-full text-sm">
@@ -85,7 +153,11 @@ export default function ProductsTable({ initialProducts }: { initialProducts: Pr
               const isEditingCost = editing?.id === p.id && editing?.field === "cost";
               return (
                 <tr key={p.id} className={`border-b hover:bg-gray-50 ${!p.is_active ? "opacity-60" : ""}`}>
-                  <td className="px-5 py-3.5 font-medium">{p.name}</td>
+                  <td className="px-5 py-3.5 font-medium">
+                    <span onClick={() => renameProduct(p)} className="cursor-pointer hover:text-blue-600" title="Click to rename">
+                      {p.name}
+                    </span>
+                  </td>
                   <td className="text-gray-500">{p.sku}</td>
                   <td>
                     {isEditingPrice ? (
@@ -125,6 +197,9 @@ export default function ProductsTable({ initialProducts }: { initialProducts: Pr
                       <button onClick={() => toggleActive(p.id, p.is_active)} className="text-[10px] bg-gray-100 text-gray-600 px-2 py-1 rounded hover:bg-gray-200">
                         {p.is_active ? "Hide" : "Show"}
                       </button>
+                      <button onClick={() => deleteProduct(p)} className="text-[10px] bg-red-100 text-red-600 px-2 py-1 rounded hover:bg-red-200" title="Delete product">
+                        🗑
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -133,7 +208,54 @@ export default function ProductsTable({ initialProducts }: { initialProducts: Pr
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-gray-400 mt-4">💡 Click any number (price, cost, stock) to edit inline.</p>
+      <p className="text-xs text-gray-400 mt-4">💡 Click the product name or any number (price, cost, stock) to edit inline.</p>
+
+      {/* Add product modal */}
+      {showAdd && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={() => !saving && setShowAdd(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="p-5 border-b flex items-center justify-between">
+              <h3 className="text-lg font-bold">Add Product</h3>
+              <button onClick={() => setShowAdd(false)} className="text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Product name *</label>
+                <input autoFocus value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Royal Honey Plus (10 sachets)" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-blue-500 focus:outline-none" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">Price (RM) *</label>
+                  <input type="number" min="0" step="0.01" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} placeholder="0.00" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-blue-500 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">Cost (RM)</label>
+                  <input type="number" min="0" step="0.01" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} placeholder="0.00" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-blue-500 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">Stock</label>
+                  <input type="number" min="0" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} placeholder="0" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-blue-500 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">SKU (optional)</label>
+                  <input value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} placeholder="Auto-generated" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-blue-500 focus:outline-none" />
+                </div>
+              </div>
+              <p className="text-[11px] text-gray-400">SKU is the product&apos;s short code (e.g. BN-006). Leave blank and one is created for you.</p>
+            </div>
+            <div className="p-5 border-t flex gap-2 justify-end">
+              <button onClick={() => setShowAdd(false)} disabled={saving} className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 hover:bg-gray-200">Cancel</button>
+              <button
+                onClick={createProduct}
+                disabled={saving || form.name.trim().length < 2 || !form.price || Number(form.price) <= 0}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-green-600 hover:bg-green-700 text-white disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {saving ? "Saving…" : "Add Product"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

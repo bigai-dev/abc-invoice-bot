@@ -13,6 +13,7 @@ export function getDb(): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   initSchema(db);
+  migrate(db);
   seedDefaults(db);
   _db = db;
   return db;
@@ -63,6 +64,7 @@ function initSchema(db: Database.Database) {
       screenshot_url text,
       invoice_pdf_url text,
       is_flagged integer default 0,
+      stripe_session_id text,
       created_at text not null,
       confirmed_at text,
       delivered_at text
@@ -136,6 +138,17 @@ function initSchema(db: Database.Database) {
   `);
 }
 
+// Additive migrations for databases created before newer columns existed.
+function migrate(db: Database.Database) {
+  const cols = db.prepare(`pragma table_info(orders)`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === "stripe_session_id")) {
+    db.exec(`alter table orders add column stripe_session_id text`);
+  }
+  // Unique guard against double-fulfilling the same Stripe payment.
+  // (SQLite allows multiple NULLs in a unique index, so old orders are unaffected.)
+  db.exec(`create unique index if not exists idx_orders_stripe_session on orders(stripe_session_id)`);
+}
+
 function seedDefaults(db: Database.Database) {
   db.prepare(`insert or ignore into invoice_settings (id) values (1)`).run();
   db.prepare(`insert or ignore into bot_settings (id) values (1)`).run();
@@ -170,9 +183,10 @@ function seedDefaults(db: Database.Database) {
 export function nextOrderRef(): string {
   const db = getDb();
   const y = new Date().getFullYear().toString();
+  // "ORD-" (4 chars) + year (4 chars) → the running number starts at position 9 (SQLite substr is 1-indexed)
   const row = db
     .prepare(
-      `select coalesce(max(cast(substr(order_reference, 8) as integer)), 0) + 1 as n
+      `select coalesce(max(cast(substr(order_reference, 9) as integer)), 0) + 1 as n
        from orders where order_reference like ?`
     )
     .get(`ORD-${y}%`) as { n: number };

@@ -2,15 +2,15 @@
 
 A self-contained Telegram shopping bot and admin dashboard that takes customers from browsing to a PDF invoice — with no cloud services required.
 
-ABC Invoice Bot lets a small business run a complete order flow inside Telegram: customers browse a product catalogue, build a cart, pay by bank transfer, and receive an auto-generated invoice, while staff approve orders, track delivery, and watch revenue from a password-protected web dashboard. It is built as a local-first demo that stores everything in a single SQLite file and the local filesystem.
+ABC Invoice Bot lets a small business run a complete order flow inside Telegram: customers browse a product catalogue, build a cart, pay by card or FPX online banking through Stripe, and receive an auto-generated invoice, while staff track delivery and watch revenue from a password-protected web dashboard. It is built as a local-first demo that stores everything in a single SQLite file and the local filesystem — the only cloud dependency is a free Stripe account in test mode (fake money).
 
 ## Features
 
 - **Telegram storefront bot** — customers shop a catalogue, set quantities with quick-pick or custom amounts, manage a cart, and check out, all through Telegram inline buttons.
 - **Guided customer onboarding** — first-time users are walked through name, phone, email, and delivery address; returning users are recognized by their Telegram ID.
-- **Bank-transfer checkout** — order summaries show subtotal, SST tax, and total, plus the business's bank details and a unique payment reference.
-- **Payment screenshot upload** — customers upload a payment screenshot (image or document); non-image uploads are auto-flagged for manual review.
-- **Automatic PDF invoices** — confirmed orders generate a branded PDF invoice (via pdf-lib) and deliver it back to the customer in chat.
+- **Stripe checkout (card + FPX)** — order summaries show subtotal, SST tax, and total with a **Pay Now** button that opens a Stripe payment page. Runs in Stripe test mode (sandbox) by default — no real money moves.
+- **Automatic payment confirmation** — Stripe pings the app (webhook) the instant payment lands; abandoned payment pages leave no trace (no order, no stock change).
+- **Automatic PDF invoices** — paid orders generate a branded PDF invoice (via pdf-lib) and deliver it back to the customer in chat, no manual review needed.
 - **Order tracking** — customers view their orders and live delivery status (processing, packed, out for delivery, delivered) and can request returns on delivered orders.
 - **Star ratings and reviews** — after delivery, customers are prompted to rate the order 1–5 stars and leave an optional comment.
 - **Smart text replies** — free-text messages are matched to common intents (greetings, pricing, shipping, payment, tracking) in English and Malay.
@@ -26,6 +26,7 @@ ABC Invoice Bot lets a small business run a complete order flow inside Telegram:
 - **Language:** TypeScript
 - **Database:** SQLite via `better-sqlite3` (single local file, WAL mode)
 - **Messaging:** Telegram Bot API (webhook mode)
+- **Payments:** Stripe Checkout (card + Malaysian FPX), confirmed via Stripe webhooks
 - **PDF generation:** `pdf-lib`
 - **Styling:** Tailwind CSS with PostCSS and Autoprefixer
 - **Storage:** local filesystem for screenshots and generated invoices (no S3 / object store)
@@ -54,6 +55,8 @@ Copy `.env.example` to `.env.local` and fill in:
 | `SESSION_SECRET` | Long random string used to sign the admin session cookie. |
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather (required for the Telegram bot). |
 | `TELEGRAM_WEBHOOK_SECRET` | Random string Telegram includes to verify incoming webhook calls. |
+| `STRIPE_SECRET_KEY` | Stripe **test** secret key (`sk_test_…`) from Stripe dashboard → Developers → API keys. |
+| `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret (`whsec_…`). Written automatically by `npm run demo` / `npm run webhook:stripe`. |
 | `NEXT_PUBLIC_APP_URL` | Public base URL of the app; must be reachable by Telegram so it can fetch invoice PDFs (use your tunnel URL for the bot). |
 | `DB_PATH` | Optional. Override the SQLite database path (defaults to `./data.db`). |
 | `STORAGE_PATH` | Optional. Override the file storage path (defaults to `./storage`). |
@@ -66,13 +69,16 @@ npm run dev
 
 Then open http://localhost:3000 in your browser — it redirects to `/admin`, where you sign in with your `ADMIN_PASSWORD`. The SQLite database and `storage/` folder are created automatically on first run, seeded with 8 sample products.
 
-To connect the Telegram bot, expose your local server with a tunnel (e.g. `ngrok http 3000`), set that public URL as `NEXT_PUBLIC_APP_URL`, restart the dev server, then register the webhook:
+To connect the Telegram bot, expose your local server with a tunnel (e.g. `ngrok http 3000`), set that public URL as `NEXT_PUBLIC_APP_URL`, restart the dev server, then register the webhooks:
 
 ```bash
-npm run webhook:set
+npm run webhook:set     # Telegram
+npm run webhook:stripe  # Stripe (also saves STRIPE_WEBHOOK_SECRET to .env.local)
 ```
 
-To remove the webhook later, run `npm run webhook:delete`.
+To remove the Telegram webhook later, run `npm run webhook:delete`.
+
+To test payments in the sandbox, use Stripe's test card `4242 4242 4242 4242` (any future expiry, any CVC) or the test bank shown on the FPX page.
 
 > Note: `npm run demo` is a one-shot helper that starts the app, opens an ngrok tunnel, updates `.env.local`, and registers the webhook for you (requires ngrok installed and authenticated).
 

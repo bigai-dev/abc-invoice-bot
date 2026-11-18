@@ -20,4 +20,6 @@ export type BotState = {
   lastOrderRef?: string;
   selectedSku?: string;
   pendingReviewId?: string;
+  /** Open (unpaid) Stripe checkout session — expired when a new checkout is made. */
+  pendingStripeSessionId?: string;
 };

@@ -6,7 +6,7 @@
 // Usage:  npm run demo
 // Requires: ngrok installed (brew install ngrok) + auth token configured (ngrok config add-authtoken ...)
 
-import { spawn, execSync } from "node:child_process";
+import { spawn, execSync, execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const ENV_PATH = `${process.cwd()}/.env.local`;
@@ -145,6 +145,19 @@ for (let attempt = 1; attempt <= 6; attempt++) {
 }
 if (webhookOk) log("telegram", c.green("✓ webhook registered"));
 else console.error(c.red("✗ webhook still failing. Run `npm run webhook:set` manually after a moment."));
+
+// ---------- 5. Register Stripe webhook (card/FPX payments) ----------
+if (env.STRIPE_SECRET_KEY) {
+  log("stripe", "registering webhook…");
+  try {
+    execFileSync("node", ["scripts/set-stripe-webhook.mjs"], { stdio: "inherit" });
+    log("stripe", c.green("✓ webhook registered"));
+  } catch {
+    console.error(c.red("✗ Stripe webhook setup failed. Run `npm run webhook:stripe` manually."));
+  }
+} else {
+  log("stripe", c.yellow("STRIPE_SECRET_KEY missing in .env.local — Pay Now will not work"));
+}
 
 // ---------- ready banner ----------
 console.log("");

@@ -9,6 +9,7 @@ export async function createOrder(input: {
   sstRate: number;
   flagged: boolean;
   screenshotUrl?: string;
+  stripeSessionId?: string;
 }) {
   const db = getDb();
   const base = input.cart.reduce((s, c) => s + c.price * c.qty, 0);
@@ -30,8 +31,8 @@ export async function createOrder(input: {
     insert into orders (
       id, order_reference, invoice_number, customer_id, telegram_chat_id,
       base_amount, sst_amount, total_amount, status, delivery_status, is_flagged,
-      screenshot_url, created_at, confirmed_at
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      screenshot_url, stripe_session_id, created_at, confirmed_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertItem = db.prepare(`
@@ -54,6 +55,7 @@ export async function createOrder(input: {
       input.flagged ? "none" : "processing",
       input.flagged ? 1 : 0,
       input.screenshotUrl ?? null,
+      input.stripeSessionId ?? null,
       now,
       input.flagged ? null : now
     );

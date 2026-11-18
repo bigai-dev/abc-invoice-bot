@@ -2,15 +2,14 @@
  * Main Telegram bot handler.
  * Called from /api/telegram/webhook with a validated Telegram Update.
  */
-import { sendMessage, sendDocument, getFile, downloadFile, inlineKeyboard, editMessageText } from "./telegram";
+import { sendMessage, inlineKeyboard, editMessageText } from "./telegram";
 import { getSession, saveSession, clearSession } from "./session";
 import { findCustomerByChatId, upsertCustomer } from "./customers";
 import { listActiveProducts, getProductBySku } from "./products";
-import { createOrder, listCustomerOrders } from "./orders";
-import { generateInvoicePDF, uploadInvoiceToStorage } from "./pdf";
-import { getDb, nextOrderRef } from "../db/client";
-import { saveFile, absoluteUrl } from "../storage/local";
-import type { BotState, CartItem } from "./types";
+import { listCustomerOrders } from "./orders";
+import { createCheckoutSessionForCart, expireCheckoutSession } from "../stripe/checkout";
+import { getDb } from "../db/client";
+import type { BotState } from "./types";
 
 type TgUpdate = any;
 
@@ -33,11 +32,11 @@ async function handleMessage(msg: any) {
   const text: string = msg.text || "";
   const state = await getSession(chatId);
 
-  if (msg.photo && msg.photo.length) {
-    return handlePaymentScreenshot(chatId, msg.photo[msg.photo.length - 1].file_id, false);
-  }
-  if (msg.document) {
-    return handlePaymentScreenshot(chatId, msg.document.file_id, true);
+  if ((msg.photo && msg.photo.length) || msg.document) {
+    return sendMessage(
+      chatId,
+      "📸 Good news — no screenshots needed anymore! We accept card & online banking. Tap /shop → Checkout to pay securely."
+    );
   }
 
   if (text.startsWith("/start")) return cmdStart(chatId);
@@ -257,7 +256,7 @@ async function saveAddress(chatId: string, text: string, _state: BotState) {
   await showMainMenu(chatId);
 }
 
-async function showMainMenu(chatId: string) {
+export async function showMainMenu(chatId: string) {
   await sendMessage(chatId, "What would you like to do?", {
     reply_markup: inlineKeyboard([
       [{ text: "🛒 Shop Products", data: "shop" }],
@@ -391,6 +390,14 @@ async function saveCustomQty(chatId: string, text: string, state: BotState) {
 async function checkout(chatId: string) {
   const st = await getSession(chatId);
   if (!st.cart || !st.cart.length) return sendMessage(chatId, "Your cart is empty. /shop to start.");
+
+  // The invoice needs a name + delivery address — profile first.
+  const customer = await findCustomerByChatId(chatId);
+  if (!customer) {
+    await sendMessage(chatId, "Almost there! We just need your delivery details before payment.");
+    return askName(chatId);
+  }
+
   const db = getDb();
   const settings = db.prepare(`select * from invoice_settings where id = 1`).get() as any;
   const sstRate = Number(settings?.sst_rate || 0.08);
@@ -398,8 +405,22 @@ async function checkout(chatId: string) {
   const sst = +(base * sstRate).toFixed(2);
   const total = +(base + sst).toFixed(2);
 
-  // Preview the next ref (not yet committed)
-  st.lastOrderRef = nextOrderRef();
+  // One active payment link at a time — cancel any previous unpaid one.
+  if (st.pendingStripeSessionId) await expireCheckoutSession(st.pendingStripeSessionId);
+
+  let session;
+  try {
+    session = await createCheckoutSessionForCart({ chatId, cart: st.cart, sstRate });
+  } catch (e) {
+    console.error("Stripe session creation failed", e);
+    return sendMessage(chatId, "⚠️ Couldn't create your payment link — please try again.");
+  }
+  if (!session.url) {
+    console.error("Stripe session missing URL", session.id);
+    return sendMessage(chatId, "⚠️ Couldn't create your payment link — please try again.");
+  }
+
+  st.pendingStripeSessionId = session.id;
   await saveSession(chatId, st);
 
   await sendMessage(
@@ -407,85 +428,10 @@ async function checkout(chatId: string) {
     `🧾 <b>Order Summary</b>\n\n` +
       st.cart.map((c) => `• ${c.name} ×${c.qty} — RM ${(c.price * c.qty).toFixed(2)}`).join("\n") +
       `\n\nSubtotal: RM ${base.toFixed(2)}\nSST (${(sstRate * 100).toFixed(0)}%): RM ${sst.toFixed(2)}\n<b>Total: RM ${total.toFixed(2)}</b>\n\n` +
-      `🏦 <b>Payment Details</b>\n` +
-      `Bank: ${settings?.bank_name}\nAccount: ${settings?.bank_account}\nName: ${settings?.bank_holder}\n` +
-      `Amount: <b>RM ${total.toFixed(2)}</b>\nReference: <b>${st.lastOrderRef}</b>\n\n` +
-      `📸 Upload your payment screenshot when done!`
+      `💳 Tap below to pay securely by card or online banking (FPX).\n` +
+      `Your invoice arrives here automatically once payment is confirmed.`,
+    { reply_markup: inlineKeyboard([[{ text: "💳 Pay Now", url: session.url }]]) }
   );
-}
-
-async function handlePaymentScreenshot(chatId: string, fileId: string, flagged: boolean) {
-  const st = await getSession(chatId);
-  if (!st.cart || !st.cart.length) {
-    return sendMessage(chatId, "Please place an order first. /shop");
-  }
-  const customer = await findCustomerByChatId(chatId);
-  if (!customer) return sendMessage(chatId, "Please complete your profile first. /start");
-
-  // Download from Telegram, save to local storage
-  let screenshotUrl: string | undefined;
-  try {
-    const fileInfo = await getFile(fileId);
-    if (fileInfo.file_path) {
-      const buf = await downloadFile(fileInfo.file_path);
-      const ext = fileInfo.file_path.split(".").pop() || "jpg";
-      const name = `${chatId}-${Date.now()}.${ext}`;
-      screenshotUrl = await saveFile("screenshots", name, buf);
-    }
-  } catch (e) {
-    console.error("Screenshot upload failed", e);
-  }
-
-  const db = getDb();
-  const settings = db.prepare(`select * from invoice_settings where id = 1`).get() as any;
-  const sstRate = Number(settings?.sst_rate || 0.08);
-
-  const { order, base, sst, total, orderRef, invoiceNo } = await createOrder({
-    chatId,
-    customerId: customer.id,
-    cart: st.cart,
-    sstRate,
-    flagged,
-    screenshotUrl,
-  });
-
-  // Snapshot the cart for invoice rendering BEFORE clearing
-  const cartSnapshot = [...st.cart];
-
-  st.cart = [];
-  st.lastOrderRef = orderRef;
-  await saveSession(chatId, st);
-
-  if (flagged) {
-    await sendMessage(
-      chatId,
-      `⚠️ Your upload isn't a valid payment screenshot. Your order <b>${orderRef}</b> has been sent for manual review. We'll get back to you soon! 🙏`
-    );
-    await showMainMenu(chatId);
-    return;
-  }
-
-  await sendMessage(chatId, "✅ <b>Payment received!</b> Generating your invoice...");
-
-  try {
-    const pdfBytes = await generateInvoicePDF({
-      orderRef,
-      invoiceNo: invoiceNo!,
-      customer: { name: customer.name, phone: customer.phone, email: customer.email, address: customer.address },
-      items: cartSnapshot,
-      base, sst, total,
-    });
-    const relativeUrl = await uploadInvoiceToStorage(order.id, pdfBytes);
-    db.prepare(`update orders set invoice_pdf_url = ? where id = ?`).run(relativeUrl, order.id);
-    // Telegram needs a publicly-fetchable URL
-    await sendDocument(chatId, absoluteUrl(relativeUrl), `📄 Invoice ${invoiceNo}`);
-  } catch (e) {
-    console.error("PDF generation failed", e);
-    await sendMessage(chatId, "Invoice is being finalized — it will arrive shortly.");
-  }
-
-  await sendMessage(chatId, `Thank you, <b>${customer.name}</b>! 🙏\n\nYour order <b>${orderRef}</b> is being processed. We'll notify you of delivery updates here!`);
-  await showMainMenu(chatId);
 }
 
 async function showMyOrders(chatId: string) {
@@ -581,8 +527,10 @@ async function smartReply(chatId: string, text: string) {
     return sendMessage(chatId, "📦 We ship within 1–3 working days after payment. Tap /orders to track.");
   }
   if (/bank|pay|bayar/.test(t)) {
-    const s = getDb().prepare(`select * from invoice_settings where id = 1`).get() as any;
-    return sendMessage(chatId, `🏦 Bank: ${s?.bank_name}\nAccount: ${s?.bank_account}\nName: ${s?.bank_holder}`);
+    return sendMessage(
+      chatId,
+      "💳 We accept card & online banking (FPX) via secure checkout. Tap /shop, add items, then ✅ Checkout to pay."
+    );
   }
   await sendMessage(chatId, "🤔 I didn't understand. Type /help for commands, or pick an option:");
   await showMainMenu(chatId);

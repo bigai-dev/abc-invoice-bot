@@ -124,9 +124,9 @@ export default function OrdersBoard({ initialOrders }: { initialOrders: Order[] 
                   style={col.key === "pending" ? { borderLeft: "3px solid #ef4444" } : {}}
                   onClick={(e) => { if ((e.target as HTMLElement).tagName !== "BUTTON") setViewingOrder(o); }}
                 >
-                  <div className="flex justify-between items-start mb-1">
-                    <div className="font-bold text-[12px]">{o.order_reference}</div>
-                    <div className="flex items-center gap-1">
+                  <div className="flex justify-between items-start mb-1 gap-1">
+                    <div className="font-bold text-[12px] truncate min-w-0" title={o.order_reference}>{o.order_reference}</div>
+                    <div className="flex items-center gap-1 shrink-0">
                       {o.screenshot_url && (
                         <button
                           onClick={(e) => { e.stopPropagation(); setViewingScreenshot(o.screenshot_url); }}
